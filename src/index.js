@@ -30,7 +30,7 @@ export default {
 
       return json(
         {
-          error: "Erro interno no painel de desempenho."
+          error: publicErrorMessage(error)
         },
         500
       );
@@ -138,6 +138,43 @@ function methodNotAllowed() {
 
 function unauthorized() {
   return json({ error: "Sessão não autenticada." }, 401);
+}
+
+
+function publicErrorMessage(error) {
+  const fallback =
+    "Não foi possível consultar o Cloudflare Analytics.";
+
+  let message = String(
+    error?.message ||
+    error ||
+    ""
+  ).trim();
+
+  if (!message) {
+    return fallback;
+  }
+
+  // Nunca devolver credenciais, IDs longos ou tokens na resposta pública.
+  message = message
+    .replace(
+      /Bearer\s+[A-Za-z0-9._~+\/=-]+/gi,
+      "Bearer [oculto]"
+    )
+    .replace(
+      /\b[a-f0-9]{32}\b/gi,
+      "[id oculto]"
+    )
+    .replace(
+      /\b[A-Za-z0-9_-]{40,}\b/g,
+      "[valor oculto]"
+    );
+
+  if (message.length > 420) {
+    message = `${message.slice(0, 420)}…`;
+  }
+
+  return `Cloudflare Analytics: ${message}`;
 }
 
 
