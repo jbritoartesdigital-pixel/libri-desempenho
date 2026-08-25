@@ -506,7 +506,198 @@ function compactInvite(invite) {
 }
 
 
+let analyticsSettingsCache = {
+  expiresAt: 0,
+  value: null
+};
+
+
 async function queryAnalytics(env, { start, end, mainHost }) {
+  const settings = await queryAnalyticsSettings(env);
+
+  const maxDurationSeconds = Math.max(
+    60,
+    safeNumber(settings.maxDuration) || 86400
+  );
+
+  const notOlderThanSeconds =
+    safeNumber(settings.notOlderThan);
+
+  if (notOlderThanSeconds > 0) {
+    const earliestAllowed =
+      Date.now() - (notOlderThanSeconds * 1000);
+
+    if (
+      new Date(start).getTime() <
+      earliestAllowed - (5 * 60 * 1000)
+    ) {
+      const availableDays = Math.max(
+        1,
+        Math.floor(notOlderThanSeconds / 86400)
+      );
+
+      throw new Error(
+        `Seu plano Cloudflare disponibiliza aproximadamente ${availableDays} ` +
+        `${availableDays === 1 ? "dia" : "dias"} de histórico para este dataset. ` +
+        "Escolha um período menor."
+      );
+    }
+  }
+
+  const chunks = splitTimeRange(
+    new Date(start),
+    new Date(end),
+    maxDurationSeconds
+  );
+
+  const results = await mapInBatches(
+    chunks,
+    5,
+    (chunk) =>
+      queryAnalyticsChunk(env, {
+        start: chunk.start.toISOString(),
+        end: chunk.end.toISOString(),
+        mainHost
+      })
+  );
+
+  return {
+    trafficGroups:
+      results.flatMap((item) => item.trafficGroups),
+
+    timelineGroups:
+      results.flatMap((item) => item.timelineGroups)
+  };
+}
+
+
+async function queryAnalyticsSettings(env) {
+  if (
+    analyticsSettingsCache.value &&
+    Date.now() < analyticsSettingsCache.expiresAt
+  ) {
+    return analyticsSettingsCache.value;
+  }
+
+  const query = `
+    query LibriAnalyticsSettings($zoneTag: string) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          settings {
+            httpRequestsAdaptiveGroups {
+              enabled
+              maxDuration
+              maxPageSize
+              notOlderThan
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const payload = await cloudflareGraphQL(
+    env,
+    query,
+    {
+      zoneTag: String(env.CLOUDFLARE_ZONE_ID)
+    }
+  );
+
+  const settings =
+    payload?.data?.viewer?.zones?.[0]
+      ?.settings
+      ?.httpRequestsAdaptiveGroups;
+
+  if (!settings) {
+    throw new Error(
+      "Não foi possível descobrir os limites de Analytics desta zona."
+    );
+  }
+
+  if (settings.enabled === false) {
+    throw new Error(
+      "O dataset httpRequestsAdaptiveGroups não está habilitado para esta zona."
+    );
+  }
+
+  analyticsSettingsCache = {
+    value: settings,
+    expiresAt: Date.now() + (5 * 60 * 1000)
+  };
+
+  return settings;
+}
+
+
+function splitTimeRange(start, end, maxDurationSeconds) {
+  const startMs = start.getTime();
+  const endMs = end.getTime();
+
+  if (
+    !Number.isFinite(startMs) ||
+    !Number.isFinite(endMs) ||
+    endMs <= startMs
+  ) {
+    return [];
+  }
+
+  const maxMs =
+    Math.max(60, maxDurationSeconds) * 1000;
+
+  const chunks = [];
+  let cursor = startMs;
+
+  while (cursor < endMs) {
+    const next = Math.min(
+      cursor + maxMs,
+      endMs
+    );
+
+    chunks.push({
+      start: new Date(cursor),
+      end: new Date(next)
+    });
+
+    cursor = next;
+  }
+
+  return chunks;
+}
+
+
+async function mapInBatches(items, batchSize, mapper) {
+  const results = [];
+
+  for (
+    let index = 0;
+    index < items.length;
+    index += batchSize
+  ) {
+    const batch = items.slice(
+      index,
+      index + batchSize
+    );
+
+    const batchResults = await Promise.all(
+      batch.map(mapper)
+    );
+
+    results.push(...batchResults);
+  }
+
+  return results;
+}
+
+
+async function queryAnalyticsChunk(
+  env,
+  {
+    start,
+    end,
+    mainHost
+  }
+) {
   const query = `
     query LibriPerformance(
       $zoneTag: string
@@ -554,11 +745,13 @@ async function queryAnalytics(env, { start, end, mainHost }) {
 
   const variables = {
     zoneTag: String(env.CLOUDFLARE_ZONE_ID),
+
     trafficFilter: {
       datetime_geq: start,
       datetime_lt: end,
       requestSource: "eyeball"
     },
+
     timelineFilter: {
       datetime_geq: start,
       datetime_lt: end,
@@ -567,45 +760,11 @@ async function queryAnalytics(env, { start, end, mainHost }) {
     }
   };
 
-  const response = await fetch(GRAPHQL_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Authorization":
-        `Bearer ${String(env.CLOUDFLARE_API_TOKEN)}`,
-      "Content-Type": "application/json",
-      "Accept": "application/json"
-    },
-    body: JSON.stringify({
-      query,
-      variables
-    })
-  });
-
-  const payload = await response.json();
-
-  if (!response.ok) {
-    console.error(
-      "Cloudflare GraphQL HTTP error:",
-      response.status,
-      payload
-    );
-
-    throw new Error(
-      "O Cloudflare não respondeu corretamente à consulta."
-    );
-  }
-
-  if (Array.isArray(payload.errors) && payload.errors.length) {
-    console.error(
-      "Cloudflare GraphQL errors:",
-      JSON.stringify(payload.errors)
-    );
-
-    throw new Error(
-      payload.errors[0]?.message ||
-      "A consulta de Analytics foi recusada pelo Cloudflare."
-    );
-  }
+  const payload = await cloudflareGraphQL(
+    env,
+    query,
+    variables
+  );
 
   const zones = payload?.data?.viewer?.zones;
 
@@ -626,6 +785,70 @@ async function queryAnalytics(env, { start, end, mainHost }) {
         ? zones[0].timelineGroups
         : []
   };
+}
+
+
+async function cloudflareGraphQL(
+  env,
+  query,
+  variables
+) {
+  const response = await fetch(
+    GRAPHQL_ENDPOINT,
+    {
+      method: "POST",
+      headers: {
+        "Authorization":
+          `Bearer ${String(env.CLOUDFLARE_API_TOKEN)}`,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify({
+        query,
+        variables
+      })
+    }
+  );
+
+  let payload = {};
+
+  try {
+    payload = await response.json();
+  } catch (_) {
+    throw new Error(
+      "O Cloudflare retornou uma resposta inválida."
+    );
+  }
+
+  if (!response.ok) {
+    console.error(
+      "Cloudflare GraphQL HTTP error:",
+      response.status,
+      payload
+    );
+
+    throw new Error(
+      payload?.errors?.[0]?.message ||
+      `O Cloudflare respondeu com HTTP ${response.status}.`
+    );
+  }
+
+  if (
+    Array.isArray(payload.errors) &&
+    payload.errors.length
+  ) {
+    console.error(
+      "Cloudflare GraphQL errors:",
+      JSON.stringify(payload.errors)
+    );
+
+    throw new Error(
+      payload.errors[0]?.message ||
+      "A consulta de Analytics foi recusada pelo Cloudflare."
+    );
+  }
+
+  return payload;
 }
 
 
