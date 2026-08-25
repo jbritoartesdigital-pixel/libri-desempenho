@@ -14,10 +14,41 @@ const DEFAULT_EXCLUDED_SLUGS = new Set([
   "motor",
   "painel-desempenho",
   "teste-motor",
+  "worker-desempenho",
+  "libri-desempenho",
+  "desempenho",
+  "rsvp",
+  "imagens",
+  "cdn-cgi",
   "favicon.ico",
   "robots.txt",
   "sitemap.xml",
-  ".well-known"
+  ".well-known",
+
+  // Rotas comuns de scanners e bots procurando CMS/WordPress.
+  "admin",
+  "administrator",
+  "blog",
+  "cms",
+  "config",
+  "env",
+  "login",
+  "news",
+  "phpinfo",
+  "site",
+  "sito",
+  "test",
+  "web",
+  "website",
+  "wordpress",
+  "wp",
+  "wp1",
+  "wp-admin",
+  "wp-content",
+  "wp-includes",
+  "xmlrpc",
+  "2019",
+  "2020"
 ]);
 
 
@@ -501,7 +532,10 @@ function compactInvite(invite) {
     path: invite.path,
     visits: invite.visits,
     requests: invite.requests,
-    bytes: invite.bytes
+    bytes: invite.bytes,
+    bytesPerVisit: invite.bytesPerVisit,
+    mbPerVisit: invite.mbPerVisit,
+    consumption: invite.consumption
   };
 }
 
@@ -899,12 +933,33 @@ function aggregateInvites(
     }
   }
 
-  return [...map.values()].map((invite) => ({
-    ...invite,
-    visits: Math.round(invite.visits),
-    requests: Math.round(invite.requests),
-    bytes: Math.round(invite.bytes)
-  }));
+  return [...map.values()]
+    .map((invite) => {
+      const visits = Math.round(invite.visits);
+      const requests = Math.round(invite.requests);
+      const bytes = Math.round(invite.bytes);
+
+      const bytesPerVisit =
+        visits > 0
+          ? bytes / visits
+          : 0;
+
+      const mbPerVisit =
+        bytesPerVisit / (1024 * 1024);
+
+      return {
+        ...invite,
+        visits,
+        requests,
+        bytes,
+        bytesPerVisit,
+        mbPerVisit,
+        consumption: consumptionReading(mbPerVisit)
+      };
+    })
+    // A tabela principal representa convites realmente acessados.
+    // Isso remove requisições isoladas de preview, scanners e lixo de internet.
+    .filter((invite) => invite.visits > 0);
 }
 
 
@@ -1027,20 +1082,86 @@ function isInvitationPagePath(path, slug) {
 }
 
 
+function isTechnicalOrBotSlug(slug) {
+  const value = String(slug || "").trim().toLowerCase();
+
+  if (!value) {
+    return true;
+  }
+
+  if (/^wp(?:-|$)/.test(value)) {
+    return true;
+  }
+
+  if (/^(?:19|20)\d{2}$/.test(value)) {
+    return true;
+  }
+
+  return [
+    "php",
+    "phpmyadmin",
+    "mysql",
+    "database",
+    "db",
+    "backup",
+    "vendor",
+    "server-status",
+    "server-info"
+  ].includes(value);
+}
+
+
+function consumptionReading(mbPerVisit) {
+  const value = safeNumber(mbPerVisit);
+
+  if (value <= 8) {
+    return {
+      key: "light",
+      label: "Leve"
+    };
+  }
+
+  if (value <= 20) {
+    return {
+      key: "moderate",
+      label: "Moderado"
+    };
+  }
+
+  if (value <= 35) {
+    return {
+      key: "heavy",
+      label: "Pesado"
+    };
+  }
+
+  return {
+    key: "very-heavy",
+    label: "Muito pesado"
+  };
+}
+
+
 function isInviteSlug(slug, excluded) {
-  if (!slug || excluded.has(slug.toLowerCase())) {
+  const value = String(slug || "").toLowerCase();
+
+  if (
+    !value ||
+    excluded.has(value) ||
+    isTechnicalOrBotSlug(value)
+  ) {
     return false;
   }
 
-  if (slug.startsWith(".")) {
+  if (value.startsWith(".")) {
     return false;
   }
 
-  if (slug.includes(".")) {
+  if (value.includes(".")) {
     return false;
   }
 
-  return /^[a-z0-9][a-z0-9-]*$/i.test(slug);
+  return /^[a-z0-9][a-z0-9-]*$/i.test(value);
 }
 
 
