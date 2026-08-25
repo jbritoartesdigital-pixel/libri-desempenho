@@ -1,0 +1,43 @@
+name: Publicar Libri Desempenho
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publicar-libri-desempenho
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publicar Worker
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v6
+
+      - name: Publicar no Cloudflare
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+
+          secrets: |
+            ADMIN_PASSWORD
+            SESSION_SECRET
+            CLOUDFLARE_API_TOKEN
+            CLOUDFLARE_ZONE_ID
+
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+
+          # Token usado pelo Worker para consultar o Analytics.
+          # É separado do token usado para fazer o deploy.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
+
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
