@@ -19,25 +19,39 @@ jobs:
       - name: Baixar repositório
         uses: actions/checkout@v6
 
+      - name: Preparar secrets de runtime
+        shell: bash
+        env:
+          LIBRI_ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          LIBRI_SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          LIBRI_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
+          LIBRI_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "ADMIN_PASSWORD": os.environ["LIBRI_ADMIN_PASSWORD"],
+              "SESSION_SECRET": os.environ["LIBRI_SESSION_SECRET"],
+              "CLOUDFLARE_API_TOKEN": os.environ["LIBRI_ANALYTICS_TOKEN"],
+              "CLOUDFLARE_ZONE_ID": os.environ["LIBRI_ZONE_ID"],
+          }
+
+          with open(".libri-runtime-secrets.json", "w", encoding="utf-8") as file:
+              json.dump(payload, file)
+          PY
+
       - name: Publicar no Cloudflare
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+          workingDirectory: "."
+          wranglerVersion: "4.125.0"
+          command: deploy --config wrangler.jsonc --secrets-file .libri-runtime-secrets.json
 
-          secrets: |
-            ADMIN_PASSWORD
-            SESSION_SECRET
-            CLOUDFLARE_API_TOKEN
-            CLOUDFLARE_ZONE_ID
-
-        env:
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-
-          # Token usado pelo Worker para consultar o Analytics.
-          # É separado do token usado para fazer o deploy.
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
-
-          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      - name: Remover arquivo temporário
+        if: always()
+        shell: bash
+        run: rm -f .libri-runtime-secrets.json
